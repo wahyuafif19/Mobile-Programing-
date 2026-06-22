@@ -1,324 +1,436 @@
-# Analisis Strategi dan Pola Integrasi REST API pada Aplikasi Mobile
+# Algoritma Penanganan Error dan Implementasi Repository Pattern pada Aplikasi Mobile
 
 **Mata Kuliah:** Mobile Programming Lanjutan (INF2.62.6005)
 **Pertemuan:** 11 — Strategi dan Pola Integrasi REST API pada Aplikasi Mobile Skala Produksi
 **Nama:** Wahyu Abdil Afif
 **NIM:** 23343085
-**Tanggal:** 20 Juni 2026
-**Studi Kasus:** BCA Mobile
+**Tanggal:** 21 Juni 2026
 
 ---
 
-# BAGIAN A — TUGAS DEKOMPOSISI
+> Tahap *Algoritma* dalam model CT-DINAMO: merancang urutan langkah belajar yang sistematis dan dapat diulang.
 
-> Tahap *Dekomposisi* dalam model CT-DINAMO: memecah sistem integrasi API aplikasi mobile menjadi sub-topik yang lebih kecil dan dapat dipelajari secara mandiri.
+## 1. Flowchart Alur Checkout Aplikasi E-commerce
 
-## A.1 Lapisan (Layer) Sistem Integrasi API
+Flowchart berikut menggambarkan alur lengkap proses checkout, dari pengguna menekan tombol checkout hingga pesanan terkonfirmasi. Diagram mencakup 5 titik keputusan yang diminta: **autentikasi** (sudah login?), **koneksi jaringan** (ada koneksi?), **refresh token** (respons 401? → sub-alur refresh), **ketersediaan stok** (stok tersedia?), dan **pembayaran** (pembayaran berhasil?).
 
-Sistem integrasi API pada aplikasi Flutter dipecah menjadi 6 lapisan agar setiap bagian memiliki tanggung jawab yang jelas, mudah diuji, dan mudah diganti tanpa mengubah lapisan lain (separation of concerns) — sejalan dengan Repository Pattern yang dibahas pada Materi 1 modul ini.
+### 1.1 Alur Utama
 
-| # | Nama Lapisan | Tanggung Jawab | Package Flutter yang Digunakan |
-|---|---|---|---|
-| 1 | **Presentation Layer (UI)** | Menampilkan widget/halaman, menangkap input pengguna, menampilkan state (loading, success, error, empty, refreshing). Tidak memanggil API secara langsung. | `flutter/material.dart`, `flutter_bloc` / `provider` / `riverpod` |
-| 2 | **State Management Layer** | Mengatur alur state asinkron aplikasi, menjembatani UI dengan business logic, merepresentasikan 6 state data (Initial, Loading, Success, Error, Empty, Refreshing). | `flutter_bloc`, `provider`, `riverpod`, `get` (GetX) |
-| 3 | **Domain / Use Case Layer** | Business logic murni: validasi input, aturan bisnis, orkestrasi pemanggilan repository. Tidak bergantung pada HTTP atau database. | Dart murni, `equatable`, `dartz` |
-| 4 | **Repository Layer** | Mengorkestrasi Remote dan Local Data Source: memutuskan kapan mengambil dari network, kapan dari cache, dan menangani fallback saat gagal. | Abstract class/interface repository (Dart murni) |
-| 5 | **Network / Service Layer** | Konfigurasi HTTP client terpusat (base URL, timeout, header), melakukan request HTTP, serta menangani interceptor (auth, logging, retry). | `dio`, `retrofit`, `http`, `json_serializable` / `freezed` |
-| 6 | **Local Storage / Persistence Layer** | Menyimpan token autentikasi secara aman, cache response API, dan preferensi pengguna untuk mendukung offline-first. | `flutter_secure_storage`, `hive`, `shared_preferences`, `sqflite` |
+![Flowchart alur utama checkout](flowchart_checkout.png)
 
-**Alur data antar lapisan:**
+### 1.2 Sub-alur: Refresh Token Otomatis
 
-```
-UI (Presentation)
-   ↓ event/action
-State Management (Bloc/Provider/Riverpod)
-   ↓ memanggil
-Domain / Use Case
-   ↓ memanggil
-Repository
-   ↓ memutuskan sumber data
-Network Service  <—atau—>  Local Storage
-   ↓ response
-(kembali naik ke atas melalui lapisan yang sama)
-```
+Ketika alur utama mendeteksi respons `401 Unauthorized` saat memanggil `GET /products/stock`, sistem masuk ke sub-alur berikut sebelum melanjutkan proses checkout:
 
-## A.2 Dekomposisi Skenario "Login ke Aplikasi Banking"
+![Sub-alur refresh token](flowchart_refresh_token.png)
 
-Diuraikan menjadi 12 langkah teknis, dari pengguna menekan tombol login hingga dashboard berhasil tampil, merujuk pada alur autentikasi JWT komprehensif di Materi 2 modul.
+**Penjelasan titik keputusan:**
 
-| Langkah | Aksi Teknis | Komponen Flutter / API / Local Storage |
+| Titik Keputusan | Letak dalam Alur | Penanganan |
 |---|---|---|
-| 1 | Pengguna mengisi user ID dan PIN/password, lalu menekan tombol "Login". | `TextFormField`, `ElevatedButton.onPressed` (Presentation) |
-| 2 | UI memvalidasi format input di sisi client (field kosong, panjang PIN) sebelum mengirim event. | `Form` + `GlobalKey<FormState>`, `validate()` (Presentation) |
-| 3 | UI mengirim event ke state management, contoh: `context.read<AuthBloc>().add(LoginRequested(...))`. | `flutter_bloc` / `riverpod` (State Management) |
-| 4 | State management memanggil `LoginUseCase.execute()` untuk menjalankan business rule (misal cek apakah akun terkunci). | Class `LoginUseCase` (Domain) |
-| 5 | Use Case memanggil `AuthRepository.login(userId, password)`. | Interface `AuthRepository` (Repository) |
-| 6 | Repository memanggil `dio.post('/auth/login', body)` ke backend bank melalui HTTPS. | `dio` (Network), endpoint `POST /v1/auth/login` |
-| 7 | `AuthInterceptor` menambahkan header standar (Content-Type, device-id, app-version) sebelum request dikirim. | `dio` `Interceptor` (Network) |
-| 8 | Backend memverifikasi kredensial; jika valid mengembalikan `access_token` (exp 15 menit), `refresh_token` (exp 7 hari), dan profil pengguna dalam JSON. | Model `LoginResponse` via `json_serializable`/`freezed` (Network) |
-| 9 | Token disimpan secara terenkripsi di local storage — **bukan** `shared_preferences` biasa karena bersifat sensitif. | `flutter_secure_storage` (Local Storage) |
-| 10 | Data profil ringan (nama, no. rekening tersamar) disimpan di cache lokal agar dashboard dapat dimuat cepat. | `hive` / `shared_preferences` (Local Storage) |
-| 11 | State management mengubah state menjadi `Success`/`LoginSuccess`; UI mendengarkan lewat `BlocListener` untuk memicu navigasi. | `BlocListener`, `Navigator.pushReplacement` |
-| 12 | Dashboard terbuka dan memanggil API tambahan (`GET /account/balance`, `GET /transactions/recent`) dengan `access_token` otomatis disisipkan via interceptor pada header `Authorization: Bearer <token>`. | `FutureBuilder`/`BlocBuilder`, `dio` Interceptor |
-
-**Catatan keamanan untuk konteks banking:**
-- Token wajib disimpan di `flutter_secure_storage` (Keychain di iOS, Keystore/EncryptedSharedPreferences di Android), bukan `shared_preferences` biasa — sesuai poin 2.4 modul tentang bahaya menyimpan token di tempat yang tidak terenkripsi.
-- Refresh token otomatis melalui `AuthInterceptor` (lihat kode pada modul 2.4) menjaga sesi tetap aktif tanpa mengusik pengguna.
-- Pertimbangkan `local_auth` (biometric lock) sebagai lapisan tambahan sebelum token dipakai ulang saat re-open app.
-
-## A.3 Daftar Sub-topik Integrasi API yang Perlu Dipelajari
-
-### Tingkat Dasar (bisa dikerjakan hari ini)
-- Konsep REST API: method HTTP (GET, POST, PUT, DELETE, PATCH)
-- Format data JSON dan proses parsing ke Dart object (`fromJson`/`toJson`)
-- Penggunaan package `http` untuk request sederhana
-- Menampilkan data API ke UI dengan `FutureBuilder`
-- Penanganan status code dasar (200, 400, 401, 404, 500)
-- Penanganan error sederhana (try-catch, timeout)
-- Struktur folder dasar project Flutter (model, service, screen)
-
-### Tingkat Menengah (perlu 1–2 minggu)
-- Migrasi dari `http` ke `dio` untuk fitur lanjutan (interceptor, base options)
-- State management untuk 6 state data asinkron (Bloc, Provider, Riverpod)
-- Autentikasi token (Bearer Token, Basic Auth) dan struktur JWT
-- Local storage aman untuk token (`flutter_secure_storage`, `shared_preferences`)
-- Repository Pattern dan pemisahan layer (remote/local data source, repository)
-- Model generation otomatis dengan `json_serializable` / `freezed`
-- Strategi caching dasar (Cache First, Network First) dengan Hive
-- Paginasi offset-based dan infinite scroll dengan `ScrollController`
-- Upload file/gambar ke API (`multipart/form-data`)
-
-### Tingkat Lanjutan (perlu 1 bulan lebih)
-- Refresh token otomatis & antrian request (401 handling) via Dio Interceptor + `Completer`
-- Implementasi Clean Architecture penuh (data, domain, presentation terpisah total)
-- Cursor-based dan keyset pagination untuk dataset besar
-- Stale While Revalidate dan strategi offline-first menyeluruh
-- Retry logic dengan exponential backoff dan deteksi *retryable error*
-- Keamanan API tingkat lanjut: SSL Pinning, enkripsi payload, anti-tampering
-- Monitoring konektivitas real-time dengan `connectivity_plus`
-- Dependency Injection untuk skalabilitas (`get_it`, `injectable`)
-- Testing integrasi API (unit test repository, mock dengan `mockito`/`mocktail`)
-- Monitoring & logging API call (Firebase Crashlytics, Sentry)
+| **Autentikasi** | Setelah tombol checkout ditekan | Jika belum login, redirect ke halaman login sambil menyimpan isi cart sementara agar tidak hilang |
+| **Koneksi jaringan** | Sebelum memanggil API stok | Jika tidak ada koneksi, tampilkan status offline dengan tombol retry manual (tidak retry otomatis karena melibatkan transaksi) |
+| **Refresh token (401)** | Saat respons API stok mengembalikan 401 | Otomatis memanggil `/auth/refresh`; jika gagal, hapus token dan arahkan ke login; jika berhasil, ulangi request asli |
+| **Ketersediaan stok** | Setelah data stok diterima | Jika stok tidak cukup, tampilkan pesan dan tawarkan pengguna menghapus/mengganti item sebelum melanjutkan |
+| **Pembayaran** | Setelah `POST /orders/checkout` dikirim | Jika gagal, tampilkan pesan gagal bayar dan tawarkan metode pembayaran lain; jika berhasil, tampilkan konfirmasi pesanan |
 
 ---
 
-# BAGIAN B — TUGAS TERSTRUKTUR (Analisis Studi Kasus Individual)
+## 2. Algoritma Penanganan Error
 
-**Aplikasi Studi Kasus:** BCA Mobile
+Algoritma berikut merinci kondisi, tindakan aplikasi, dan tampilan UI untuk 5 skenario kegagalan yang umum terjadi pada integrasi API, merujuk pada matriks error handling komprehensif Materi 5 modul.
 
-## B.1 Identitas & Konteks
-
-| Keterangan | Isi |
-|---|---|
-| Nama | Wahyu Abdil Afif |
-| NIM | 23343085 |
-| Tanggal | 20 Juni 2026 |
-| Aplikasi Studi Kasus | BCA Mobile (aplikasi mobile banking PT Bank Central Asia) |
-
-BCA Mobile dipilih karena merepresentasikan kelas aplikasi dengan kebutuhan integrasi API paling ketat: keamanan data finansial, akurasi saldo real-time, serta toleransi nol terhadap data yang stale pada transaksi uang. Analisis berikut bersifat **inferensial** — disusun berdasarkan pola arsitektur umum aplikasi mobile banking dan prinsip-prinsip pada modul ini, bukan hasil reverse-engineering kode sumber resmi BCA Mobile yang bersifat tertutup/proprietary.
-
-## B.2 Diagram Alur Integrasi API
-
-Diagram berikut menggambarkan alur komprehensif: autentikasi (login → simpan token), request terautentikasi, refresh token otomatis, dan fallback ke cache saat offline.
-
-![Diagram alur autentikasi BCA Mobile](diagram-alur-autentikasi.png)
-
-Diagram mencakup titik keputusan: kredensial valid/tidak, ada koneksi/tidak, token kadaluarsa (401)/tidak, dan refresh token berhasil/gagal — sesuai cakupan flowchart pada modul (autentikasi, request terautentikasi, refresh token, dan offline fallback). Versi lengkap dengan tata letak rapi juga tersedia pada file `.docx`.
-
-## B.3 Analisis Pattern yang Digunakan
-
-Aplikasi sekelas BCA Mobile secara umum mengadopsi kombinasi **Repository Pattern** dan **Service Layer**, sejalan dengan Materi 1 modul ini.
-
-**Service Layer** bertindak sebagai satu titik konfigurasi untuk seluruh komunikasi HTTP — base URL endpoint perbankan, timeout yang ketat (mengingat transaksi finansial tidak boleh menggantung terlalu lama), header wajib seperti device fingerprint, dan rangkaian interceptor untuk autentikasi serta logging. Tanpa Service Layer terpusat, setiap fitur (transfer, cek saldo, pembayaran) akan mengonfigurasi koneksinya sendiri-sendiri, yang membuat audit keamanan dan pembaruan kebijakan TLS menjadi sangat sulit dilakukan secara konsisten di seluruh aplikasi.
-
-**Repository Pattern** menjadi lapisan abstraksi yang memisahkan "bagaimana data saldo/transaksi diperoleh" dari "bagaimana data tersebut ditampilkan". Untuk fitur seperti cek saldo, `BalanceRepository` akan mengorkestrasi antara `BalanceRemoteDataSource` (memanggil endpoint saldo terkini) dan `BalanceLocalDataSource` (cache sementara untuk tampilan instan), lalu memutuskan strategi mana yang dipakai berdasarkan kekritisan data — pola yang identik dengan contoh `ProductRepositoryImpl` pada modul (Materi 1.3).
-
-**Mengapa pattern ini dipilih untuk konteks banking:**
-1. **Testability** — Logika bisnis (misalnya validasi limit transfer harian) dapat diuji secara terisolasi tanpa benar-benar memanggil API produksi bank.
-2. **Auditabilitas** — Pemisahan layer membuat jalur data finansial dapat ditelusuri dan diaudit, sebuah kebutuhan kepatuhan (compliance) yang ketat di industri perbankan.
-3. **Keamanan terpusat** — Semua request finansial melewati satu Service Layer yang sama, sehingga kebijakan keamanan (sertifikat SSL, header wajib) dapat diterapkan secara konsisten di satu tempat.
-4. **Fleksibilitas data source** — Repository dapat membedakan data yang *boleh* di-cache (riwayat transaksi lama) dari data yang *tidak boleh* di-cache (saldo real-time, status OTP) tanpa mengubah kode di lapisan UI.
-
-**Diagram struktur folder (gambaran umum):**
+### a) Tidak Ada Koneksi Internet
 
 ```
-lib/
-├── data/
-│   ├── datasources/
-│   │   ├── remote/
-│   │   │   ├── auth_remote_data_source.dart
-│   │   │   ├── balance_remote_data_source.dart
-│   │   │   └── transaction_remote_data_source.dart
-│   │   └── local/
-│   │       ├── token_local_data_source.dart
-│   │       └── transaction_cache_data_source.dart
-│   ├── models/
-│   │   ├── login_response.dart
-│   │   ├── balance_model.dart
-│   │   └── transaction_model.dart
-│   └── repositories/
-│       ├── auth_repository_impl.dart
-│       ├── balance_repository_impl.dart
-│       └── transaction_repository_impl.dart
-├── domain/
-│   ├── entities/
-│   │   ├── user.dart
-│   │   └── transaction.dart
-│   ├── repositories/            # abstract interface
-│   │   ├── auth_repository.dart
-│   │   ├── balance_repository.dart
-│   │   └── transaction_repository.dart
-│   └── usecases/
-│       ├── login_usecase.dart
-│       └── get_balance_usecase.dart
-├── network/
-│   ├── dio_service.dart
-│   ├── interceptors/
-│   │   ├── auth_interceptor.dart
-│   │   └── logging_interceptor.dart
-└── presentation/
-    ├── login/
-    ├── dashboard/
-    └── transaction_history/
+KONDISI:
+  - Request API gagal dilempar dengan SocketException, atau
+  - connectivity_plus melaporkan status ConnectivityResult.none
+
+ALGORITMA:
+  1. Tangkap exception pada lapisan Repository (try-catch di sekitar panggilan remote data source)
+  2. JANGAN langsung melempar error ke UI -- cek dulu apakah ada data cache yang valid
+  3. JIKA ada cache valid (Cache First/Network First dengan fallback):
+       -> kembalikan data cache, tandai sebagai "data offline"
+     SELESAI ke-> 5
+  4. JIKA tidak ada cache:
+       -> lempar custom exception NetworkException ke UI layer
+  5. Mulai StreamSubscription pada connectivity_plus untuk memantau perubahan koneksi
+  6. KETIKA koneksi kembali tersedia:
+       -> trigger ulang request secara otomatis (untuk GET) ATAU
+       -> aktifkan kembali tombol retry (untuk POST/transaksi)
+
+TAMPILAN UI:
+  - Banner non-intrusif di bagian atas: "Anda sedang offline"
+  - Jika ada cache: tampilkan data dengan label kecil "Data terakhir tersimpan"
+  - Jika tidak ada cache: empty state dengan ilustrasi + tombol "Coba lagi"
+  - Nonaktifkan tombol aksi yang memerlukan koneksi (checkout, transfer, dll.)
 ```
 
-*(Jumlah kata bagian analisis pattern: ±320 kata)*
+### b) Server Error (HTTP 500)
 
-## B.4 Strategi Caching
+```
+KONDISI:
+  - Response.statusCode berada pada rentang 500-599 (Internal Server Error,
+    Bad Gateway, Service Unavailable)
 
-Untuk aplikasi mobile banking, pemilihan strategi caching per endpoint sangat krusial karena keseimbangan antara *kecepatan tampilan* dan *akurasi data finansial* — sesuai 5 strategi caching pada Materi 4 modul.
+ALGORITMA:
+  1. Intersep response di DioInterceptor.onError() sebelum diteruskan ke UI
+  2. Cek apakah operasi bersifat idempotent (GET, aman diulang) atau
+     non-idempotent (POST transaksi, berisiko duplikasi jika diulang)
+  3. JIKA idempotent (GET):
+       -> jalankan retryWithBackoff() maksimal 3 kali
+       -> delay: 1s -> 2s -> 4s (exponential backoff)
+     JIKA gagal setelah 3 percobaan:
+       -> lempar error ke UI, log ke Firebase Crashlytics
+  4. JIKA non-idempotent (POST transaksi seperti checkout):
+       -> JANGAN retry otomatis
+       -> tampilkan status "tertunda" dan arahkan user mengecek riwayat
+          sebelum mencoba ulang
+  5. Log seluruh detail error (status code, endpoint, response body) untuk
+     keperluan debugging, tanpa menampilkan detail teknis ke pengguna
 
-| Endpoint | Strategi Caching | Alasan |
-|---|---|---|
-| `GET /account/balance` (saldo rekening) | **Network First** | Saldo adalah data paling kritis dan tidak boleh stale. Selalu coba ambil dari server terlebih dahulu; cache hanya dipakai sebagai fallback darurat saat benar-benar offline, disertai label "data terakhir, mungkin tidak akurat". |
-| `GET /transactions/history` (riwayat transaksi lama, > 24 jam) | **Cache First** | Transaksi yang sudah selesai dan tercatat tidak berubah lagi, sehingga aman ditampilkan dari cache untuk kecepatan, sambil disegarkan di background. |
-| `GET /reference/banks` (daftar bank tujuan transfer) | **Cache Only** | Data referensi statis yang jarang berubah. Diambil sekali (prefetch) dan disimpan; invalidasi manual dilakukan saat ada update dari server (versioning). |
-| `POST /transfer/verify-otp` (verifikasi OTP transfer) | **Network Only** | Data keamanan kritis dengan masa berlaku sangat singkat; tidak boleh ada fallback offline maupun cache sama sekali. |
-| `GET /dashboard/promo` (banner promo di home) | **Stale While Revalidate** | Bukan data finansial sensitif. Cache lama ditampilkan instan agar dashboard terasa cepat, sambil data terbaru diambil di background dan UI diperbarui begitu tersedia. |
+TAMPILAN UI:
+  - Untuk GET: loading indicator selama proses retry berlangsung
+  - Setelah retry gagal: "Terjadi kesalahan pada server. Coba lagi nanti."
+    dengan tombol "Coba Lagi"
+  - Untuk POST/transaksi: dialog "Permintaan Anda sedang diproses. Silakan
+    cek status sebelum mencoba lagi." (mencegah transaksi duplikat)
+```
 
-## B.5 Error Handling Plan
+### c) Request Timeout
 
-Rancangan penanganan error untuk skenario kegagalan, mengikuti matriks error handling komprehensif pada Materi 5 modul, dengan penekanan pada konteks transaksi finansial.
+```
+KONDISI:
+  - DioException dengan type DioExceptionType.connectionTimeout,
+    sendTimeout, atau receiveTimeout
 
-| Skenario Error | Kode Status / Exception | Tindakan yang Diambil | Tampilan UI |
-|---|---|---|---|
-| Tidak ada koneksi internet | `SocketException` / Network Error | Cek konektivitas via `connectivity_plus`; jangan kirim transaksi finansial dalam kondisi ini sama sekali. | Banner "Tidak ada koneksi internet" + tombol nonaktif sementara untuk transaksi |
-| Server error saat transfer | HTTP 500/502/503 | **Tidak** melakukan retry otomatis untuk transaksi finansial (berbeda dari GET biasa) — risiko transaksi ganda. Tampilkan status "tertunda", arahkan cek riwayat transaksi. | Dialog "Transaksi sedang diproses, mohon cek riwayat sebelum mencoba lagi" |
-| Token kadaluarsa (401) saat cek saldo | HTTP 401 Unauthorized | `AuthInterceptor` otomatis memanggil `/auth/refresh`; jika berhasil, ulangi request asli secara transparan. | Tidak ada perubahan terlihat oleh pengguna (seamless) |
-| Refresh token juga kadaluarsa | HTTP 401 pada endpoint refresh | Hapus seluruh token dari `flutter_secure_storage`, arahkan ke halaman login. | Dialog "Sesi Anda telah berakhir, silakan login kembali" |
-| PIN/OTP salah saat transfer | HTTP 400 Bad Request (`INVALID_OTP`) | Parse error code spesifik dari response; jangan retry otomatis demi keamanan (cegah brute force). | Pesan "Kode OTP salah, sisa percobaan: 2" |
-| Saldo tidak cukup | HTTP 400 (`INSUFFICIENT_BALANCE`) | Tampilkan pesan spesifik berdasarkan error code dari server, bukan asumsi dari sisi client. | Dialog "Saldo Anda tidak cukup untuk transaksi ini" |
-| Timeout saat transfer | `DioException` (timeout) | Set timeout realistis (connect 10s, receive 30s); **jangan** retry otomatis untuk transaksi yang sudah terkirim — arahkan cek status terlebih dahulu. | "Koneksi lambat. Mohon cek status transaksi di Riwayat sebelum mencoba lagi" |
+ALGORITMA:
+  1. Pastikan konfigurasi timeout sudah realistis di Service Layer:
+       connectTimeout: 10 detik, receiveTimeout: 30 detik
+     (timeout terlalu pendek menyebabkan false-positive error)
+  2. Tangkap DioException di interceptor, cek field 'type'
+  3. JIKA operasi idempotent (GET) dan belum mencapai batas retry:
+       -> retry dengan exponential backoff (sama seperti skenario b)
+  4. JIKA operasi non-idempotent (transaksi):
+       -> JANGAN retry otomatis karena request asli mungkin sudah
+          diterima server meski response belum kembali ke client
+       -> arahkan pengguna mengecek status transaksi terlebih dahulu
+  5. Tampilkan estimasi waktu tunggu jika memungkinkan (skeleton loading
+     dengan placeholder, bukan spinner kosong saja)
 
-## B.6 Contoh Kode Dio Interceptor
+TAMPILAN UI:
+  - "Koneksi terlalu lambat. Coba lagi?" dengan tombol retry yang jelas
+  - Untuk transaksi: "Koneksi lambat. Mohon cek status transaksi di
+    Riwayat sebelum mencoba lagi."
+```
 
-Implementasi `AuthInterceptor` yang menangani penambahan auth header, deteksi 401, dan refresh token otomatis dengan antrian request — diadaptasi dari pola pada Materi 2.4 modul untuk konteks BCA Mobile.
+### d) Token Kadaluarsa (HTTP 401)
+
+```
+KONDISI:
+  - Response.statusCode == 401 Unauthorized
+
+ALGORITMA:
+  1. Intersep di AuthInterceptor.onError()
+  2. Cek apakah endpoint termasuk kategori sensitif (contoh: /transfer,
+     /otp) -- jika ya, JANGAN coba refresh, langsung teruskan error
+     (mencegah retry otomatis pada operasi finansial kritis)
+  3. JIKA bukan endpoint sensitif:
+     a. JIKA sedang ada proses refresh berjalan (_isRefreshing == true):
+          -> masukkan request ini ke dalam antrian (_pendingRequests)
+          -> tunggu sampai proses refresh selesai
+     b. JIKA belum ada proses refresh berjalan:
+          -> set _isRefreshing = true
+          -> panggil POST /auth/refresh dengan refresh_token tersimpan
+          -> JIKA berhasil:
+               * simpan access_token baru ke flutter_secure_storage
+               * ulangi request asli dengan token baru
+               * selesaikan seluruh request yang mengantri di langkah (a)
+          -> JIKA gagal (refresh_token juga kadaluarsa):
+               * hapus seluruh token dari secure storage
+               * set state aplikasi ke "logged out"
+               * arahkan pengguna ke halaman login
+  4. Set _isRefreshing = false setelah proses selesai (baik berhasil
+     atau gagal), kosongkan antrian
+
+TAMPILAN UI:
+  - Jika refresh berhasil: TIDAK ADA perubahan terlihat oleh pengguna
+    (proses sepenuhnya transparan/seamless)
+  - Jika refresh gagal: dialog informatif "Sesi Anda telah berakhir,
+    silakan login kembali" lalu redirect, BUKAN crash diam-diam
+```
+
+### e) Format Data Tidak Sesuai
+
+```
+KONDISI:
+  - JSON parsing melempar FormatException atau TypeError
+  - Field yang diharapkan null/missing pada response API
+  - Struktur response berubah dari kontrak yang disepakati (API versioning)
+
+ALGORITMA:
+  1. Bungkus SETIAP proses deserialisasi JSON (fromJson) dalam try-catch
+     di lapisan Remote Data Source -- jangan biarkan exception
+     menjalar tak terkendali ke Repository atau UI
+  2. Tangkap exception spesifik:
+       try {
+         return Model.fromJson(response.data);
+       } catch (e) {
+         throw DataParsingException(
+           message: 'Format data tidak sesuai',
+           rawResponse: response.data, // untuk keperluan log, bukan ke user
+         );
+       }
+  3. Log raw response (request URL, response body, stack trace) ke
+     crash reporting (Firebase Crashlytics/Sentry) untuk investigasi tim
+     backend -- ini biasanya indikasi API berubah tanpa pemberitahuan
+  4. Tentukan fallback di Repository:
+       JIKA ada cache valid -> tampilkan cache dengan peringatan
+       JIKA tidak ada cache -> tampilkan error generik ke pengguna
+  5. JANGAN PERNAH menampilkan detail teknis (nama field yang error,
+     stack trace) langsung ke pengguna akhir
+
+TAMPILAN UI:
+  - Pesan generik dan tidak teknis: "Data tidak dapat dimuat saat ini.
+    Tim kami sedang menangani masalah ini."
+  - Tombol "Coba Lagi" untuk memicu request ulang
+  - TIDAK menampilkan pesan seperti "FormatException: Unexpected
+    character" ke pengguna
+```
+
+---
+
+## 3. Urutan Langkah Implementasi Repository Pattern dari Nol
+
+Berikut adalah urutan implementasi Repository Pattern secara bertahap pada proyek Flutter baru, dari pembuatan abstract class hingga terhubung ke UI layer — merujuk pada Materi 1 modul (komponen Repository Pattern) dengan studi kasus fitur "daftar produk".
+
+### Langkah 1 — Definisikan Entity / Model Domain
+
+Buat kelas data murni yang merepresentasikan domain object, terpisah dari struktur JSON API.
 
 ```dart
-class BcaAuthInterceptor extends Interceptor {
-  final SecureTokenStorage _tokenStorage;
-  final AuthRepository _authRepo;
+// lib/domain/entities/product.dart
+class Product {
+  final String id;
+  final String name;
+  final double price;
+  final int stock;
 
-  // Antrian request yang menunggu proses refresh token selesai
-  final List<ErrorInterceptorHandler> _pendingRequests = [];
-  bool _isRefreshing = false;
+  const Product({
+    required this.id,
+    required this.name,
+    required this.price,
+    required this.stock,
+  });
+}
+```
 
-  // STEP 1: Sisipkan access token ke setiap request keluar
-  @override
-  void onRequest(
-    RequestOptions options,
-    RequestInterceptorHandler handler,
-  ) async {
-    final token = await _tokenStorage.getAccessToken();
-    if (token != null) {
-      options.headers['Authorization'] = 'Bearer $token';
-    }
-    // Header tambahan khusus konteks banking
-    options.headers['X-Device-Id'] = await _tokenStorage.getDeviceId();
-    handler.next(options);
+### Langkah 2 — Buat Abstract Class (Repository Interface)
+
+Definisikan kontrak operasi data. UI dan Use Case hanya akan bergantung pada interface ini.
+
+```dart
+// lib/domain/repositories/product_repository.dart
+abstract class ProductRepository {
+  Future<List<Product>> getProducts({int page = 1, int limit = 20});
+  Future<Product> getProductById(String id);
+}
+```
+
+### Langkah 3 — Implementasi Remote Data Source
+
+Buat kelas yang mengambil data dari REST API menggunakan `dio`, termasuk model DTO dan konversi `fromJson`.
+
+```dart
+// lib/data/models/product_model.dart
+class ProductModel {
+  final String id;
+  final String name;
+  final double price;
+  final int stock;
+
+  ProductModel({required this.id, required this.name, required this.price, required this.stock});
+
+  factory ProductModel.fromJson(Map<String, dynamic> json) => ProductModel(
+        id: json['id'],
+        name: json['name'],
+        price: (json['price'] as num).toDouble(),
+        stock: json['stock'],
+      );
+
+  Product toEntity() => Product(id: id, name: name, price: price, stock: stock);
+}
+
+// lib/data/datasources/remote/product_remote_data_source.dart
+class ProductRemoteDataSource {
+  final Dio _dio;
+  ProductRemoteDataSource(this._dio);
+
+  Future<List<ProductModel>> fetchProducts({int page = 1, int limit = 20}) async {
+    final response = await _dio.get('/products', queryParameters: {'page': page, 'limit': limit});
+    final List data = response.data['data'];
+    return data.map((json) => ProductModel.fromJson(json)).toList();
+  }
+}
+```
+
+### Langkah 4 — Implementasi Local Data Source
+
+Buat kelas untuk membaca/menulis data dari penyimpanan lokal (Hive) untuk keperluan caching.
+
+```dart
+// lib/data/datasources/local/product_local_data_source.dart
+class ProductLocalDataSource {
+  static const String _boxName = 'products_cache';
+
+  Future<void> cacheProducts(List<ProductModel> products) async {
+    final box = Hive.box(_boxName);
+    await box.put('products', {
+      'data': products.map((p) => p.toJson()).toList(),
+      'cached_at': DateTime.now().toIso8601String(),
+    });
   }
 
-  // STEP 2: Tangani error 401 dan lakukan refresh token
+  Future<List<ProductModel>?> getCachedProducts() async {
+    final box = Hive.box(_boxName);
+    final cached = box.get('products');
+    if (cached == null) return null;
+    final List data = cached['data'];
+    return data.map((json) => ProductModel.fromJson(json)).toList();
+  }
+}
+```
+
+### Langkah 5 — Implementasi Repository (Orkestrasi Remote + Local)
+
+Hubungkan abstract class dengan kedua data source, tentukan strategi (Network First/Cache First, dsb.).
+
+```dart
+// lib/data/repositories/product_repository_impl.dart
+class ProductRepositoryImpl implements ProductRepository {
+  final ProductRemoteDataSource _remote;
+  final ProductLocalDataSource _local;
+
+  ProductRepositoryImpl({required ProductRemoteDataSource remote, required ProductLocalDataSource local})
+      : _remote = remote, _local = local;
+
   @override
-  void onError(
-    DioException err,
-    ErrorInterceptorHandler handler,
-  ) async {
-    final statusCode = err.response?.statusCode;
-
-    // Jangan refresh untuk endpoint sensitif (OTP, transfer)
-    // — biarkan error diteruskan langsung demi keamanan
-    final isSensitiveEndpoint =
-        err.requestOptions.path.contains('/transfer') ||
-        err.requestOptions.path.contains('/otp');
-
-    if (statusCode == 401 && !isSensitiveEndpoint) {
-      if (_isRefreshing) {
-        // Antrikan request ini sampai proses refresh selesai
-        _pendingRequests.add(handler);
-        return;
+  Future<List<Product>> getProducts({int page = 1, int limit = 20}) async {
+    try {
+      final products = await _remote.fetchProducts(page: page, limit: limit);
+      if (page == 1) await _local.cacheProducts(products);
+      return products.map((p) => p.toEntity()).toList();
+    } catch (e) {
+      if (page == 1) {
+        final cached = await _local.getCachedProducts();
+        if (cached != null) return cached.map((p) => p.toEntity()).toList();
       }
-      _isRefreshing = true;
+      rethrow;
+    }
+  }
+
+  @override
+  Future<Product> getProductById(String id) async {
+    final model = await _remote.fetchProductById(id);
+    return model.toEntity();
+  }
+}
+```
+
+### Langkah 6 — Dependency Injection
+
+Daftarkan seluruh dependensi (Dio, data source, repository) agar dapat di-inject ke Use Case/ViewModel tanpa coupling langsung ke implementasi konkret.
+
+```dart
+// lib/injection/injection_container.dart (menggunakan get_it)
+final getIt = GetIt.instance;
+
+void setupDependencies() {
+  // Network
+  getIt.registerLazySingleton<Dio>(() => DioService.createDio(
+        baseUrl: 'https://api.tokopedia-clone.com',
+        authInterceptor: getIt<AuthInterceptor>(),
+      ));
+
+  // Data sources
+  getIt.registerLazySingleton<ProductRemoteDataSource>(
+      () => ProductRemoteDataSource(getIt<Dio>()));
+  getIt.registerLazySingleton<ProductLocalDataSource>(
+      () => ProductLocalDataSource());
+
+  // Repository
+  getIt.registerLazySingleton<ProductRepository>(() => ProductRepositoryImpl(
+        remote: getIt<ProductRemoteDataSource>(),
+        local: getIt<ProductLocalDataSource>(),
+      ));
+
+  // Use case
+  getIt.registerLazySingleton<GetProductsUseCase>(
+      () => GetProductsUseCase(getIt<ProductRepository>()));
+}
+```
+
+### Langkah 7 — Hubungkan ke UI Layer
+
+State management (Bloc/Provider/Riverpod) memanggil Use Case, lalu UI mendengarkan perubahan state dan merender hasilnya.
+
+```dart
+// lib/presentation/product/product_bloc.dart
+class ProductBloc extends Bloc<ProductEvent, ApiState<List<Product>>> {
+  final GetProductsUseCase _getProductsUseCase;
+
+  ProductBloc(this._getProductsUseCase) : super(const Initial()) {
+    on<LoadProducts>((event, emit) async {
+      emit(const Loading());
       try {
-        final newToken = await _authRepo.refreshToken();
-        await _tokenStorage.saveAccessToken(newToken);
-
-        // Ulangi request asli dengan token baru
-        final retryResponse =
-            await _retryRequest(err.requestOptions, newToken);
-        handler.resolve(retryResponse);
-
-        // Selesaikan semua request yang sempat mengantri
-        for (final pending in _pendingRequests) {
-          final resp = await _retryRequest(err.requestOptions, newToken);
-          pending.resolve(resp);
-        }
-      } catch (_) {
-        // Refresh token gagal — paksa logout demi keamanan
-        await _tokenStorage.clearAll();
-        handler.reject(err);
-      } finally {
-        _isRefreshing = false;
-        _pendingRequests.clear();
+        final products = await _getProductsUseCase.execute();
+        emit(products.isEmpty ? const Empty() : Success(products));
+      } catch (e) {
+        emit(Error(e.toString()));
       }
-    } else if (statusCode == 403) {
-      // 403 = otorisasi ditolak, bukan masalah token — jangan refresh
-      handler.next(err);
-    } else {
-      handler.next(err);
-    }
+    });
   }
+}
 
-  Future<Response> _retryRequest(
-    RequestOptions requestOptions,
-    String newToken,
-  ) {
-    final options = Options(
-      method: requestOptions.method,
-      headers: {
-        ...requestOptions.headers,
-        'Authorization': 'Bearer $newToken',
-      },
-    );
-    return Dio().request(
-      requestOptions.path,
-      data: requestOptions.data,
-      queryParameters: requestOptions.queryParameters,
-      options: options,
+// lib/presentation/product/product_screen.dart
+class ProductScreen extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return BlocProvider(
+      create: (_) => getIt<ProductBloc>()..add(LoadProducts()),
+      child: BlocBuilder<ProductBloc, ApiState<List<Product>>>(
+        builder: (context, state) => switch (state) {
+          Loading() => const Center(child: CircularProgressIndicator()),
+          Success(:final data) => ProductListView(products: data),
+          Error(:final message) => ErrorView(message: message),
+          Empty() => const EmptyStateView(),
+          _ => const SizedBox.shrink(),
+        },
+      ),
     );
   }
 }
 ```
 
-**Catatan desain kode:**
-- Endpoint sensitif (`/transfer`, `/otp`) **tidak** diikutsertakan dalam mekanisme auto-refresh dan retry — kegagalan pada endpoint ini dibiarkan diteruskan ke business logic agar pengguna mengulang transaksi secara sadar, mencegah risiko transaksi ganda akibat retry otomatis.
-- Status 403 (Forbidden) sengaja dibedakan dari 401 (Unauthorized) — sejalan dengan poin Materi 5.1: 403 adalah masalah otorisasi, bukan token kadaluarsa, sehingga tidak perlu memicu refresh token.
+**Ringkasan urutan implementasi:**
+
+```
+1. Entity / Model domain    -> apa yang direpresentasikan
+2. Abstract class           -> kontrak apa yang bisa dilakukan
+3. Remote Data Source       -> bagaimana mengambil dari API
+4. Local Data Source        -> bagaimana mengambil dari cache lokal
+5. Repository Implementation -> bagaimana mengorkestrasi keduanya
+6. Dependency Injection     -> bagaimana semua komponen terhubung
+7. UI Layer (Bloc + Widget) -> bagaimana hasil ditampilkan ke pengguna
+```
+
+Urutan ini sengaja dimulai dari lapisan domain (paling independen) menuju UI (paling tergantung), sehingga setiap lapisan dapat diuji secara terisolasi sebelum lapisan berikutnya dibangun di atasnya.
 
 ---
 
 ## Pengumpulan
 
-- **Platform:** GitHub README.md / Notion (format digital)
-- **Format nama file/repo:** `Analisis_P11_23343085_Wahyu_Abdil_Afif`
+- **Format nama:** `Algoritma_P11_23343085_Wahyu_Abdil_Afif`
 - **Deadline:** 48 jam setelah pertemuan
-- **Pengumpulan:** Link repositori GitHub atau Notion dikirimkan ke Google Drive kelas
+- **Pengumpulan:** Link dokumen + link diagram dikumpulkan di kolom submission
